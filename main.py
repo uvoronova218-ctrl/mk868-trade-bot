@@ -116,6 +116,16 @@ def show_number(value: Decimal) -> str:
     return format(value, "f")
 
 
+def show_price(value: Decimal, digits: int | None) -> str:
+    """Show broker price precision without silently rounding real levels."""
+    if digits is None:
+        return show_number(value)
+    rendered = format(value, f".{digits}f")
+    if Decimal(rendered) != value:
+        raise ContractError(f"Price precision exceeds {digits} decimal places")
+    return rendered
+
+
 def safe(text: str) -> str:
     return html.escape(text, quote=True)
 
@@ -137,7 +147,7 @@ def prepare(data: dict) -> Prepared:
     schema = clean_text(data, "schemaVersion", required=True, limit=80)
     if schema != "2":
         raise ContractError("Unsupported schemaVersion (expected 2)")
-    clean_text(data, "strategyVersion", required=True)
+    strategy_version = clean_text(data, "strategyVersion", required=True)
     account = clean_text(data, "accountAlias", required=True)
     event = clean_text(data, "event", required=True)
     if event not in EVENTS:
@@ -147,6 +157,18 @@ def prepare(data: dict) -> Prepared:
     symbol = clean_text(data, "symbol", limit=32)
     timeframe = clean_text(data, "timeframe", limit=16)
     side = clean_text(data, "side", limit=8)
+    test_flag = data.get("testOnly", False)
+    if type(test_flag) is not bool:
+        raise ContractError("testOnly must be a boolean")
+    # Keep compatibility with the existing local staging smoke test.
+    test_only = test_flag or (account == "TEST-NO-TRADE" and strategy_version.startswith("STAGING-"))
+    configured_digits = data.get("priceDigits")
+    if configured_digits is None:
+        price_digits = 5 if symbol == "EURUSD" else None
+    elif type(configured_digits) is not int or not 0 <= configured_digits <= 10:
+        raise ContractError("priceDigits must be an integer from 0 to 10")
+    else:
+        price_digits = configured_digits
     if side is not None and side not in {"BUY", "SELL", "NONE"}:
         raise ContractError("Invalid side")
     if event in {"PREATTENTION", "BUY", "SELL", "SIGNAL_CONFIRMED", "ORDER_SUBMITTED", "ORDER_FILLED"}:
@@ -271,7 +293,12 @@ def prepare(data: dict) -> Prepared:
         "CONNECTION_LOST": "⚠️ MONEY ENGINE — CONNECTION LOST",
         "CONNECTION_RESTORED": "✅ MONEY ENGINE — CONNECTION RESTORED",
     }
-    rows = [f"<b>{titles[event]}</b>", line("Счёт", account)]
+    display_title = titles[event]
+    if test_only:
+        display_title = f"🧪 ТЕСТ — {subject} {title_side or event} — НЕ ТОРГОВАТЬ"
+    rows = [f"<b>{display_title}</b>", line("Счёт", account)]
+    if test_only:
+        rows.insert(1, "<b>СИНТЕТИЧЕСКАЯ ПРОВЕРКА. ЭТО НЕ ТОРГОВЫЙ СИГНАЛ.</b>")
     if timeframe:
         rows.append(line("Таймфрейм", timeframe))
     if side in {"BUY", "SELL"} and event not in {"BUY", "SELL", "PREATTENTION", "SIGNAL_CONFIRMED"}:
@@ -286,6 +313,11 @@ def prepare(data: dict) -> Prepared:
         if val is not None and val != "NONE":
             rows.append(line(label, str(val)))
 
+    price_labels = {
+        "Возможный Entry", "Entry", "Цена исполнения",
+        "Возможный SL", "Stop Loss", "Возможный TP", "Take Profit",
+        "Новый Stop Loss", "Новый Take Profit", "Текущая цена",
+    }
     for value, label in (
         (entry, "Возможный Entry" if event == "PREATTENTION" else "Entry"),
         (fill, "Цена исполнения"), (stop, "Возможный SL" if event == "PREATTENTION" else "Stop Loss"),
@@ -302,11 +334,14 @@ def prepare(data: dict) -> Prepared:
         (seconds, "Секунд до закрытия"),
     ):
         if value is not None:
-            rows.append(line(label, ("1:" if label == "Risk/Reward" else "") + show_number(value)))
+            rendered = show_price(value, price_digits) if label in price_labels else show_number(value)
+            rows.append(line(label, ("1:" if label == "Risk/Reward" else "") + rendered))
 
     rows.append(line("Причина", reason))
     rows.append(line("Время UTC", timestamp.isoformat().replace("+00:00", "Z")))
-    if event == "PREATTENTION":
+    if test_only:
+        rows.append("<b>ТЕСТОВОЕ СОБЫТИЕ. Реальный сигнал не формировался; сделка не открывалась.</b>")
+    elif event == "PREATTENTION":
         rows.append("<b>НЕ ВХОДИТЬ. Потенциальный сигнал может исчезнуть к закрытию M5.</b>")
     elif event in TRADE_SIGNALS:
         rows.append("<b>Сигнал подтверждён; исполнение заявки ещё не подтверждено.</b>")
