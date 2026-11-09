@@ -55,8 +55,9 @@ def payload(event="BUY", event_id="E-1"):
 def test_buy_message_has_prices_and_no_placeholders(bot):
     module, _ = bot
     result = module.prepare(payload())
-    assert "1.099" in result.message
-    assert "1.1012" in result.message
+    assert "<b>Entry:</b> 1.10000" in result.message
+    assert "<b>Stop Loss:</b> 1.09900" in result.message
+    assert "<b>Take Profit:</b> 1.10120" in result.message
     assert "UNKNOWN" not in result.message
     assert "N/A" not in result.message
     assert "XTB" not in result.message
@@ -188,3 +189,86 @@ def test_failed_delivery_can_retry(bot, monkeypatch):
     assert client.post("/webhook", json=p).status_code == 503
     assert client.post("/webhook", json=p).status_code == 200
     assert len(calls) == 2
+
+
+def test_staging_smoke_buy_sell_and_preattention_are_clearly_marked(bot):
+    module, _ = bot
+    for event, side, stop, take in (
+        ("BUY", "BUY", 1.099, 1.1012),
+        ("SELL", "SELL", 1.101, 1.0988),
+        ("PREATTENTION", "BUY", 1.099, 1.1012),
+    ):
+        p = payload(event=event, event_id=f"SMOKE-{event}")
+        p.update({
+            "strategyVersion": "STAGING-SMOKE-TEST",
+            "accountAlias": "TEST-NO-TRADE",
+            "side": side,
+            "stopLoss": stop,
+            "takeProfit": take,
+            "reason": "TEST_ONLY_NO_TRADE",
+        })
+        if event == "PREATTENTION":
+            p["timestampUTC"] = "2026-11-09T09:59:00Z"
+            p["barClosed"] = False
+            p["secondsToClose"] = 60
+        message = module.prepare(p).message
+        assert f"🧪 ТЕСТ — EURUSD {side} — НЕ ТОРГОВАТЬ" in message
+        assert "ЭТО НЕ ТОРГОВЫЙ СИГНАЛ" in message
+        assert "ПОДТВЕРЖДЁННЫЙ СИГНАЛ" not in message
+        assert "Сигнал подтверждён" not in message
+        assert "<b>Entry:</b> 1.10000" in message or "<b>Возможный Entry:</b> 1.10000" in message
+        assert "<b>Stop Loss:</b> 1.09900" in message or "<b>Stop Loss:</b> 1.10100" in message or "<b>Возможный SL:</b> 1.09900" in message
+        assert "UNKNOWN" not in message and "N/A" not in message
+
+
+def test_explicit_test_only_flag_labels_test_even_without_smoke_account(bot):
+    module, _ = bot
+    p = payload()
+    p["testOnly"] = True
+    message = module.prepare(p).message
+    assert "🧪 ТЕСТ — EURUSD BUY" in message
+    assert "ПОДТВЕРЖДЁННЫЙ СИГНАЛ" not in message
+
+
+def test_regular_signal_preserves_confirmed_label(bot):
+    module, _ = bot
+    message = module.prepare(payload()).message
+    assert "ПОДТВЕРЖДЁННЫЙ СИГНАЛ" in message
+    assert "🧪 ТЕСТ" not in message
+    assert "Сигнал подтверждён" in message
+
+
+@pytest.mark.parametrize("value", ["true", 1, None])
+def test_invalid_test_only_type_rejected(bot, value):
+    module, _ = bot
+    p = payload()
+    p["testOnly"] = value
+    with pytest.raises(module.ContractError):
+        module.prepare(p)
+
+
+def test_eurusd_price_precision_must_not_be_silently_rounded(bot):
+    module, _ = bot
+    p = payload()
+    p["referenceEntry"] = "1.100001"
+    with pytest.raises(module.ContractError, match="Price precision"):
+        module.prepare(p)
+
+
+def test_non_eurusd_prices_are_not_given_unverified_precision(bot):
+    module, _ = bot
+    p = payload(event="SYSTEM_STATUS")
+    p["symbol"] = "OTHER"
+    p["side"] = "NONE"
+    p["referenceEntry"] = "123.456789"
+    message = module.prepare(p).message
+    assert "<b>Entry:</b> 123.456789" in message
+
+
+@pytest.mark.parametrize("digits", [-1, 11, "5", True])
+def test_invalid_price_digits_rejected(bot, digits):
+    module, _ = bot
+    p = payload()
+    p["priceDigits"] = digits
+    with pytest.raises(module.ContractError, match="priceDigits"):
+        module.prepare(p)
