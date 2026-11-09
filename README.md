@@ -78,3 +78,11 @@ python -m pytest -q
 \`\`\`
 
 Tests monkeypatch Telegram sending; no real token and no orders. A passing local test does not certify Render compatibility or production readiness.
+
+### Staging-safe display and numerical price formatting
+
+- EURUSD prices are shown with exactly 5 decimal places (e.g. `1.10000`, `1.09900`). An optional integer `priceDigits` from 0 to 10 overrides the display precision when a producer has verified instrument metadata. The webhook rejects prices that would require rounding at the specified precision, rather than silently modifying trading levels.
+- Other symbols without verified `priceDigits` keep their exact supplied decimal representation; no unverified precision is invented.
+- Set `"testOnly": true` on synthetic research/staging events to display a prominent `🧪 ТЕСТ — ... — НЕ ТОРГОВАТЬ` heading and a warning that no real signal/trade took place. The original local staging smoke test is also recognized via `accountAlias="TEST-NO-TRADE"` combined with a `strategyVersion` beginning `STAGING-`.
+- Live and ordinary demo events are **not** automatically labeled as synthetic tests. Trading notifications still require complete closed-M5 evidence and price geometry. Labeling does not change order handling (this notifier has no execution capability).
+- The `feature/money-engine-telegram-v2` branch can be deployed to the dedicated Render staging service; **do not merge into `main`** or replace the old bot until end-to-end and persistence checks are accepted.
